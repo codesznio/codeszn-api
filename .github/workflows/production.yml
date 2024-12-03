@@ -1,1 +1,142 @@
+name: Production
 
+on:
+    push:
+        tags:
+            - 'v*' # Matches tags like "v1.0.0"
+
+jobs:
+    create-branch:
+        name: Create Bump Version Branch
+        runs-on: ubuntu-latest
+
+        steps:
+            # Step 1: Checkout the repository
+            - name: Checkout code
+              uses: actions/checkout@v3
+
+            # Step 2: Extract version from tag
+            - name: Extract version from tag
+              id: extract_version
+              run: |
+                  TAG_NAME=${GITHUB_REF#refs/tags/}
+                  VERSION=${TAG_NAME#v}
+                  echo "VERSION=$VERSION" >> $GITHUB_ENV
+                  echo "Extracted version: $VERSION"
+
+            # Step 3: Create and push new branch
+            - name: Create and push new branch
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  BRANCH_NAME="bump-version/v${{ env.VERSION }}"
+                  git checkout -b $BRANCH_NAME
+                  git push origin $BRANCH_NAME
+                  echo "Created and pushed branch: $BRANCH_NAME"
+
+            # Step 4: Update package.json version
+            - name: Update package.json version
+              run: |
+                  echo "Updating package.json version to ${{ env.VERSION }}"
+                  jq --arg version "${{ env.VERSION }}" '.version = $version' package.json > package.tmp.json
+                  mv package.tmp.json package.json
+                  echo "Updated package.json:"
+                  cat package.json
+
+            # Step 5: Commit and push changes
+            - name: Commit and push changes
+              run: |
+                  git add package.json
+                  git commit -m "chore: update version to ${{ env.VERSION }}"
+                  git push origin HEAD
+                  echo "Committed and pushed changes to branch $BRANCH_NAME"
+
+            # Step 6: Create Pull Request
+            - name: Create pull request
+              uses: actions/github-script@v6
+              with:
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+                  script: |
+                      const version = process.env.VERSION;
+                      const branchName = `bump-version/v${version}`;
+                      const { data: pullRequest } = await github.rest.pulls.create({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        title: `chore: bump version to ${version}`,
+                        head: branchName,
+                        base: 'main',
+                        body: `This PR updates the package.json version to match the release tag: **v${version}**.`,
+                      });
+
+                      console.log(`Pull request created: ${pullRequest.html_url}`);
+
+            # Step 7: Automatically Merge the Pull Request
+            - name: Automatically merge pull request
+              uses: actions/github-script@v6
+              with:
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+                  script: |
+                      const version = process.env.VERSION;
+                      const branchName = `bump-version/v${version}`;
+
+                      // Find the pull request
+                      const { data: pullRequests } = await github.rest.pulls.list({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        head: `${context.repo.owner}:${branchName}`,
+                        state: 'open',
+                      });
+
+                      if (pullRequests.length > 0) {
+                        const pullRequest = pullRequests[0];
+                        console.log(`Found PR #${pullRequest.number}. Merging...`);
+
+                        // Merge the pull request
+                        await github.rest.pulls.merge({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          pull_number: pullRequest.number,
+                          merge_method: "squash", // Ensure this is a valid string
+                        });
+
+                        console.log(`Successfully merged PR #${pullRequest.number}`);
+                      } else {
+                        console.log(`No open pull request found for branch ${branchName}`);
+                        throw new Error(`No open pull request found for branch ${branchName}`);
+                      }
+
+    deploy:
+        name: Deploy to Production
+        needs: create-branch
+        runs-on: ubuntu-latest
+
+        steps:
+            # Step 1: Checkout Code
+            - name: Checkout code
+              uses: actions/checkout@v3
+
+            # Step 2: Setup Node.js
+            - name: Set up Node.js
+              uses: actions/setup-node@v3
+              with:
+                  node-version: 20 # Use the version compatible with your project
+
+            # Step 3: Install pnpm
+            - name: Install pnpm
+              run: |
+                  npm install -g pnpm
+
+            # Step 4: Install Dependencies
+            - name: Install dependencies
+              run: pnpm install
+
+            # Step 5: Build the Project
+            - name: Build the project
+              run: pnpm build
+
+            # Step 6: Deploy to Render
+            - name: Trigger Render Deploy Hook
+              env:
+                  RENDER_PRODUCTION: ${{ secrets.RENDER_PRODUCTION }}
+              run: |
+                  curl -X POST $RENDER_PRODUCTION
